@@ -7,6 +7,29 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  vite: {
+    resolve: {
+      alias: [
+        { find: /^punycode\/$/, replacement: "punycode" },
+        { find: "punycode/", replacement: "punycode" },
+      ],
+    },
+    plugins: [
+      {
+        name: "fix-punycode-slash",
+        enforce: "pre",
+        resolveId(id) {
+          if (id === "punycode/") {
+            return this.resolve("punycode");
+          }
+          if (id.startsWith("punycode/")) {
+            return this.resolve("punycode");
+          }
+          return null;
+        },
+      },
+    ],
+  },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
