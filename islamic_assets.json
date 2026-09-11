@@ -1,0 +1,30 @@
+[
+  {
+    "ticker": "SPSK",
+    "name_ar": "صندوق الصكوك العالمية (SP Funds)",
+    "asset_class": "صكوك سيادية واستثمارية",
+    "sharia_screened": true,
+    "currency": "USD"
+  },
+  {
+    "ticker": "ISDW",
+    "name_ar": "صندوق الأسهم العالمية المتوافقة مع الشريعة (iShares MSCI World Islamic)",
+    "asset_class": "أسهم عالمية نقية",
+    "sharia_screened": true,
+    "currency": "USD"
+  },
+  {
+    "ticker": "ISDE",
+    "name_ar": "صندوق الأسواق الناشئة الإسلامية (iShares MSCI EM Islamic)",
+    "asset_class": "أسهم أسواق ناشئة",
+    "sharia_screened": true,
+    "currency": "USD"
+  },
+  {
+    "ticker": "SGLD",
+    "name_ar": "الذهب المادي المدعوم فعلياً (Invesco Physical Gold)",
+    "asset_class": "سلع ومعادن ثمينة",
+    "sharia_screened": true,
+    "currency": "USD"
+  }
+]
