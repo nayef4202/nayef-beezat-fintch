@@ -8,6 +8,7 @@
     "build": "node scripts/fix-punycode.mjs && vite build",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
+    "start": "node .output/server/index.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "postinstall": "node scripts/fix-punycode.mjs"
