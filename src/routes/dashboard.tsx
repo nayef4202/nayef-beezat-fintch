@@ -36,7 +36,7 @@ function DashboardPage() {
     if (!loading && !user) navigate({ to: "/auth" });
   }, [user, loading, navigate]);
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, isError, refetch } = useQuery({
     queryKey: ["my-portfolio", user?.id],
     queryFn: () => fetchPortfolio(),
     enabled: !!user,
@@ -44,16 +44,32 @@ function DashboardPage() {
     refetchOnWindowFocus: true,
   });
 
-  if (isLoading) return <main className="p-10 text-center">جاري التحميل...</main>;
+  if (isLoading) {
+    return (
+      <main className="flex min-h-[50vh] flex-col items-center justify-center px-4 py-16 text-center">
+        <div className="size-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+        <p className="mt-4 text-sm text-muted-foreground">جاري تحميل بيانات محفظتك...</p>
+      </main>
+    );
+  }
 
-  if (!data) {
+  if (isError || !data) {
     return (
       <main className="mx-auto max-w-xl px-4 py-16 text-center">
         <h1 className="text-2xl font-bold">لوحة التحكم</h1>
-        <p className="mt-4 mb-6 text-muted-foreground">ما عندك محفظة بعد. جاوب على الاستبيان أول.</p>
-        <Button asChild>
-          <Link to="/questionnaire">ابدأ الاستبيان</Link>
-        </Button>
+        <p className="mt-4 mb-6 text-muted-foreground">
+          {isError ? "تعذر تحميل بيانات المحفظة حالياً." : "ما عندك محفظة بعد. جاوب على الاستبيان أول."}
+        </p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
+          {isError && (
+            <Button onClick={() => refetch()} variant="outline">
+              إعادة المحاولة
+            </Button>
+          )}
+          <Button asChild>
+            <Link to="/questionnaire">ابدأ الاستبيان</Link>
+          </Button>
+        </div>
       </main>
     );
   }

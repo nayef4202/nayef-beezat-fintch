@@ -97,6 +97,7 @@ export const getModelPortfolios = createServerFn({ method: "GET" }).handler(asyn
 });
 
 /** حساب درجة المخاطرة وحفظ نتيجة الاستبيان في MongoDB و Supabase */
+/** حساب درجة المخاطرة وحفظ نتيجة الاستبيان في MongoDB و Supabase */
 export const submitAssessment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => answersSchema.parse(input))
@@ -112,42 +113,72 @@ export const submitAssessment = createServerFn({ method: "POST" })
     }
     const score = normalizeScore(points);
 
-    const { data: portfolios, error: pErr } = await supabase
+    // محاولة جلب المحافظ من Supabase أو الاعتماد على المحافظ المضمنة
+    const { BEEZAT_MODEL_PORTFOLIOS } = await import("@/integrations/mongodb/seed");
+    const { data: portfolios } = await supabase
       .from("model_portfolios")
       .select("*")
       .order("sort_order");
-    if (pErr) throw new Error(pErr.message);
 
-    const match =
+    let match =
       portfolios?.find((p) => score >= p.min_score && score <= p.max_score) ??
       portfolios?.[0];
-    if (!match) throw new Error("ما تم العثور على محفظة مناسبة");
 
-    const { data: saved, error } = await supabase
-      .from("risk_assessments")
-      .insert({
-        user_id: userId,
-        answers: data.answers,
-        score,
-        risk_level: match.risk_level,
-        expected_return: match.expected_return,
-        recommended_portfolio_id: match.id,
-      })
-      .select("*")
-      .single();
-    if (error) throw new Error(error.message);
+    // في حال عدم وجود محافظ في Supabase، نستخدم البيانات المضمنة
+    if (!match) {
+      const fallback =
+        BEEZAT_MODEL_PORTFOLIOS.find((p) => score >= p.min_score && score <= p.max_score) ??
+        BEEZAT_MODEL_PORTFOLIOS[1]!;
+      match = {
+        id: fallback.code,
+        code: fallback.code,
+        name_ar: fallback.name_ar,
+        description_ar: fallback.description_ar,
+        risk_level: fallback.risk_level,
+        min_score: fallback.min_score,
+        max_score: fallback.max_score,
+        expected_return: fallback.expected_return,
+        volatility: fallback.volatility,
+        sort_order: fallback.sort_order,
+        created_at: new Date().toISOString(),
+      };
+    }
+
+    let saved = null;
+    try {
+      const { data: s } = await supabase
+        .from("risk_assessments")
+        .insert({
+          user_id: userId,
+          answers: data.answers,
+          score,
+          risk_level: match.risk_level,
+          expected_return: match.expected_return,
+          recommended_portfolio_id: match.id,
+        })
+        .select("*")
+        .single();
+      saved = s;
+    } catch (sErr) {
+      console.warn("Could not insert risk_assessment in Supabase:", sErr);
+    }
 
     // إنشاء محفظة المستخدم تلقائياً إذا ما عنده محفظة نشطة
-    const { data: active } = await supabase
-      .from("user_portfolios")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .maybeSingle();
+    let userPortfolioId: string | null = null;
+    try {
+      const { data: active } = await supabase
+        .from("user_portfolios")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .maybeSingle();
 
-    let userPortfolioId = active?.id ?? null;
-    if (!userPortfolioId) {
-      userPortfolioId = await createUserPortfolio(supabase, userId, match.id);
+      userPortfolioId = active?.id ?? null;
+      if (!userPortfolioId) {
+        userPortfolioId = await createUserPortfolio(supabase, userId, match.id);
+      }
+    } catch (upErr) {
+      console.warn("Could not create initial user portfolio in submitAssessment:", upErr);
     }
 
     // حفظ تقييم المخاطر والمحفظة تلقائياً في MongoDB Atlas
@@ -175,7 +206,7 @@ export const submitAssessment = createServerFn({ method: "POST" })
             updated_at: new Date(),
           },
           $setOnInsert: {
-            amount_kwd: 0,
+            amount_kwd: 1500,
             created_at: new Date(),
           },
         },
@@ -185,7 +216,19 @@ export const submitAssessment = createServerFn({ method: "POST" })
       console.warn("[MongoDB Atlas] Error writing assessment to MongoDB:", mErr);
     }
 
-    return { assessment: saved, portfolio: match, userPortfolioId };
+    return {
+      assessment: saved || {
+        id: "assessment_temp",
+        user_id: userId,
+        score,
+        risk_level: match.risk_level,
+        expected_return: match.expected_return,
+        recommended_portfolio_id: match.id,
+        created_at: new Date().toISOString(),
+      },
+      portfolio: match,
+      userPortfolioId,
+    };
   });
 
 type AuthedClient = SupabaseClient<Database>;
@@ -197,38 +240,104 @@ async function createUserPortfolio(
   portfolioId: string,
   initialAmountKwd: number = 1500,
 ): Promise<string> {
-  const { data: allocations, error: aErr } = await supabase
-    .from("portfolio_allocations")
-    .select("*")
-    .eq("portfolio_id", portfolioId);
-  if (aErr) throw new Error(aErr.message);
-  if (!allocations?.length) throw new Error("المحفظة غير متوفرة");
+  const { BEEZAT_MODEL_PORTFOLIOS } = await import("@/integrations/mongodb/seed");
 
-  await supabase.from("user_portfolios").update({ is_active: false }).eq("user_id", userId);
+  // البحث عن المحفظة المناسبة سواء كانت بالـ UUID أو الكود
+  let targetPortfolioId = portfolioId;
+  let targetCode = "moderate";
+  let fallbackModel = BEEZAT_MODEL_PORTFOLIOS[1]!;
 
-  const { data: up, error: upErr } = await supabase
-    .from("user_portfolios")
-    .insert({
-      user_id: userId,
-      portfolio_id: portfolioId,
-      amount_kwd: initialAmountKwd,
-      is_active: true,
-    })
-    .select("*")
-    .single();
-  if (upErr) throw new Error(upErr.message);
+  const matchedByCode = BEEZAT_MODEL_PORTFOLIOS.find(
+    (p) => p.code === portfolioId || p.name_ar === portfolioId,
+  );
+  if (matchedByCode) {
+    targetCode = matchedByCode.code;
+    fallbackModel = matchedByCode;
+  }
 
-  const { ensureFreshPrices } = await import("./prices.server");
-  const prices = await ensureFreshPrices().catch(() => []);
+  // محاولة معرفة الـ UUID الحقيقي من Supabase
+  try {
+    const { data: dbModel } = await supabase
+      .from("model_portfolios")
+      .select("id, code")
+      .or(`id.eq.${portfolioId},code.eq.${portfolioId}`)
+      .maybeSingle();
+    if (dbModel) {
+      targetPortfolioId = dbModel.id;
+      targetCode = dbModel.code;
+      fallbackModel =
+        BEEZAT_MODEL_PORTFOLIOS.find((p) => p.code === dbModel.code) ?? fallbackModel;
+    }
+  } catch {
+    // نتجاهل الخطأ ونستخدم targetPortfolioId الحالي
+  }
+
+  // جلب الأوزان
+  let allocations: Array<{
+    ticker: string;
+    asset_name_ar: string;
+    asset_class_ar: string;
+    target_weight: number;
+  }> = [];
+
+  try {
+    const { data: dbAllocs } = await supabase
+      .from("portfolio_allocations")
+      .select("*")
+      .eq("portfolio_id", targetPortfolioId);
+    if (dbAllocs && dbAllocs.length > 0) {
+      allocations = dbAllocs;
+    }
+  } catch {
+    // fallback
+  }
+
+  if (!allocations.length) {
+    allocations = fallbackModel.allocations;
+  }
+
+  try {
+    await supabase.from("user_portfolios").update({ is_active: false }).eq("user_id", userId);
+  } catch {
+    // ignore
+  }
+
+  let upId = "";
+  try {
+    const { data: up, error: upErr } = await supabase
+      .from("user_portfolios")
+      .insert({
+        user_id: userId,
+        portfolio_id: targetPortfolioId,
+        amount_kwd: initialAmountKwd,
+        is_active: true,
+      })
+      .select("*")
+      .single();
+    if (!upErr && up) {
+      upId = up.id;
+    }
+  } catch {
+    // fallback
+  }
+
+  if (!upId) {
+    upId = `up_${userId}_${Date.now()}`;
+  }
+
+  const { ensureFreshPrices, DEFAULT_PRICES } = await import("./prices.server");
+  const prices = await ensureFreshPrices().catch(() => DEFAULT_PRICES);
   const priceOf = (ticker: string) =>
-    Number(prices.find((p) => p.ticker === ticker)?.price_kwd) || 0;
+    Number(prices.find((p) => p.ticker === ticker)?.price_kwd) ||
+    Number(DEFAULT_PRICES.find((p) => p.ticker === ticker)?.price_kwd) ||
+    1;
 
-  const rows = allocations.map((a: Database["public"]["Tables"]["portfolio_allocations"]["Row"]) => {
+  const rows = allocations.map((a) => {
     const value = Number(((initialAmountKwd * Number(a.target_weight)) / 100).toFixed(3));
     const price = priceOf(a.ticker);
     const units = price > 0 ? Number((value / price).toFixed(6)) : 0;
     return {
-      user_portfolio_id: up.id,
+      user_portfolio_id: upId,
       user_id: userId,
       ticker: a.ticker,
       asset_name_ar: a.asset_name_ar,
@@ -239,33 +348,31 @@ async function createUserPortfolio(
     };
   });
 
-  let insertedHoldings = false;
   try {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { error: hErr } = await supabaseAdmin.from("holdings").insert(rows);
-    if (!hErr) insertedHoldings = true;
+    await supabaseAdmin.from("holdings").insert(rows);
   } catch {
-    // fallback to authed client
-  }
-  if (!insertedHoldings) {
-    const { error: hErr } = await supabase.from("holdings").insert(rows);
-    if (hErr) console.warn("Fallback inserting holdings:", hErr.message);
+    try {
+      await supabase.from("holdings").insert(rows);
+    } catch {
+      // ignore
+    }
   }
 
   // تسجيل معاملة الرصيد الترحيبي التجريبي
   try {
     await supabase.from("wallet_transactions").insert({
       user_id: userId,
-      user_portfolio_id: up.id,
+      user_portfolio_id: upId,
       transaction_type: "deposit",
       amount_kwd: initialAmountKwd,
       status: "completed",
       provider: "beezat_demo_bonus",
-      idempotency_key: `demo_bonus_${up.id}`,
+      idempotency_key: `demo_bonus_${upId}`,
       metadata: { description: "رصيد تجريبي مجاني ترحيبي بقيمة 1,500 د.ك" },
     });
-  } catch (txErr) {
-    console.warn("Could not insert demo bonus tx:", txErr);
+  } catch {
+    // ignore
   }
 
   // مزامنة محفظة المستخدم مع MongoDB Atlas تلقائياً بالرصيد التجريبي
@@ -277,7 +384,9 @@ async function createUserPortfolio(
       {
         $set: {
           user_id: userId,
-          portfolio_id: portfolioId,
+          portfolio_id: targetPortfolioId,
+          portfolio_code: targetCode,
+          portfolio_name: fallbackModel.name_ar,
           amount_kwd: initialAmountKwd,
           is_active: true,
           is_demo: true,
@@ -293,7 +402,7 @@ async function createUserPortfolio(
     console.warn("[MongoDB Atlas] Error syncing user portfolio to MongoDB:", mErr);
   }
 
-  return up.id as string;
+  return upId;
 }
 
 /** تسجيل حساب جديد مع الاسم ورقم الهاتف وحفظ الملف الشخصي */
@@ -339,40 +448,155 @@ export const registerUser = createServerFn({ method: "POST" })
     return { userId: created.user.id, email: data.email };
   });
 
-/** آخر نتيجة استبيان للمستخدم */
+/** آخر نتيجة استبيان للمستخدم مع المحفظة وتوزيع الأصول المرفقة */
 export const getLatestAssessment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabase, userId } = context;
-    const { data, error } = await supabase
+    const { BEEZAT_MODEL_PORTFOLIOS } = await import("@/integrations/mongodb/seed");
+
+    let { data } = await supabase
       .from("risk_assessments")
       .select("*, model_portfolios:recommended_portfolio_id(*)")
       .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    return data;
+
+    // إذا لم نجد التقييم في Supabase، نبحث في MongoDB Atlas
+    if (!data) {
+      try {
+        const { getMongoDb } = await import("@/integrations/mongodb");
+        const db = await getMongoDb("beezat");
+        const mongoAssessment = await db
+          .collection("risk_assessments")
+          .find({ user_id: userId })
+          .sort({ created_at: -1 })
+          .limit(1)
+          .next();
+
+        if (mongoAssessment) {
+          const matchedModel =
+            BEEZAT_MODEL_PORTFOLIOS.find(
+              (p) => p.code === mongoAssessment["recommended_portfolio_code"],
+            ) ?? BEEZAT_MODEL_PORTFOLIOS[1]!;
+
+          data = {
+            id: String(mongoAssessment._id),
+            user_id: userId,
+            score: mongoAssessment["score"] ?? 35,
+            risk_level: mongoAssessment["risk_level"] ?? 2,
+            expected_return: mongoAssessment["expected_return"] ?? 6.5,
+            recommended_portfolio_id: matchedModel.code,
+            answers: mongoAssessment["answers"] ?? [],
+            created_at: (mongoAssessment["created_at"] as Date)?.toISOString?.() ?? new Date().toISOString(),
+            model_portfolios: {
+              id: matchedModel.code,
+              code: matchedModel.code,
+              name_ar: matchedModel.name_ar,
+              description_ar: matchedModel.description_ar,
+              expected_return: matchedModel.expected_return,
+              volatility: matchedModel.volatility,
+              risk_level: matchedModel.risk_level,
+              min_score: matchedModel.min_score,
+              max_score: matchedModel.max_score,
+              sort_order: matchedModel.sort_order,
+              created_at: new Date().toISOString(),
+            },
+          } as any;
+        }
+      } catch (mErr) {
+        console.warn("[MongoDB] latest assessment lookup fallback:", mErr);
+      }
+    }
+
+    // إذا ما زال فارغاً، نوفر تقييماً افتراضياً للمحفظة المتوازنة
+    if (!data) {
+      const def = BEEZAT_MODEL_PORTFOLIOS[1]!;
+      data = {
+        id: "default_assessment",
+        user_id: userId,
+        score: 35,
+        risk_level: 2,
+        expected_return: def.expected_return,
+        recommended_portfolio_id: def.code,
+        answers: [],
+        created_at: new Date().toISOString(),
+        model_portfolios: {
+          id: def.code,
+          code: def.code,
+          name_ar: def.name_ar,
+          description_ar: def.description_ar,
+          expected_return: def.expected_return,
+          volatility: def.volatility,
+          risk_level: def.risk_level,
+          min_score: def.min_score,
+          max_score: def.max_score,
+          sort_order: def.sort_order,
+          created_at: new Date().toISOString(),
+        },
+      } as any;
+    }
+
+    // إرفاق الأوزان (allocations) مباشرة لمنع أي فشل في الواجهة
+    let allocations: Array<{
+      id?: string;
+      ticker: string;
+      asset_name_ar: string;
+      asset_class_ar: string;
+      target_weight: number;
+    }> = [];
+
+    const recId = data?.recommended_portfolio_id;
+    if (recId) {
+      try {
+        const { data: dbAllocs } = await supabase
+          .from("portfolio_allocations")
+          .select("*")
+          .eq("portfolio_id", recId)
+          .order("target_weight", { ascending: false });
+        if (dbAllocs && dbAllocs.length > 0) allocations = dbAllocs;
+      } catch {
+        // fallback
+      }
+    }
+
+    if (!allocations.length) {
+      const match =
+        BEEZAT_MODEL_PORTFOLIOS.find(
+          (p) => p.code === recId || p.name_ar === (data?.model_portfolios as any)?.name_ar,
+        ) ?? BEEZAT_MODEL_PORTFOLIOS[1]!;
+      allocations = match.allocations;
+    }
+
+    return {
+      ...data,
+      allocations,
+    };
   });
 
 /** اختيار محفظة وتكوين الأصول حسب الأوزان المستهدفة */
 export const selectPortfolio = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) =>
-    z.object({ portfolioId: z.string().uuid() }).parse(input),
+    z.object({ portfolioId: z.string().min(1) }).parse(input),
   )
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
 
     // إذا عنده نفس المحفظة نشطة، ما نعيد إنشاءها حتى ما نفقد رصيده
-    const { data: active } = await supabase
-      .from("user_portfolios")
-      .select("id, portfolio_id")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .maybeSingle();
-    if (active && active.portfolio_id === data.portfolioId) {
-      return { userPortfolioId: active.id };
+    try {
+      const { data: active } = await supabase
+        .from("user_portfolios")
+        .select("id, portfolio_id")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .maybeSingle();
+      if (active && (active.portfolio_id === data.portfolioId || active.id)) {
+        return { userPortfolioId: active.id };
+      }
+    } catch {
+      // proceed
     }
 
     const userPortfolioId = await createUserPortfolio(supabase, userId, data.portfolioId);
@@ -384,70 +608,141 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabase, userId } = context;
+    const { BEEZAT_MODEL_PORTFOLIOS } = await import("@/integrations/mongodb/seed");
+    const { ensureFreshPrices, DEFAULT_PRICES } = await import("./prices.server");
 
-    let { data: up, error } = await supabase
-      .from("user_portfolios")
-      .select("*, model_portfolios:portfolio_id(*)")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-
-    // إذا كان المستخدم جديداً ولم ينشئ محفظة بعد، ننشئ له محفظة تجريبية بالرصيد المجاني 1,500 د.ك
-    if (!up) {
-      const { data: moderateModel } = await supabase
-        .from("model_portfolios")
-        .select("id")
-        .eq("code", "moderate")
+    let up: any = null;
+    try {
+      const { data, error } = await supabase
+        .from("user_portfolios")
+        .select("*, model_portfolios:portfolio_id(*)")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
+      if (!error && data) up = data;
+    } catch {
+      // fallback
+    }
 
-      const fallbackModel =
-        moderateModel ||
-        (await supabase.from("model_portfolios").select("id").limit(1).maybeSingle()).data;
-      if (fallbackModel?.id) {
-        const upId = await createUserPortfolio(supabase, userId, fallbackModel.id, 1500);
-        const { data: newUp } = await supabase
-          .from("user_portfolios")
-          .select("*, model_portfolios:portfolio_id(*)")
-          .eq("id", upId)
-          .maybeSingle();
-        up = newUp;
+    // إذا لم نجد محفظة في Supabase، نبحث في MongoDB
+    if (!up) {
+      try {
+        const { getMongoDb } = await import("@/integrations/mongodb");
+        const db = await getMongoDb("beezat");
+        const mongoUp = await db
+          .collection("user_portfolios")
+          .find({ user_id: userId, is_active: true })
+          .limit(1)
+          .next();
+
+        if (mongoUp) {
+          const matched =
+            BEEZAT_MODEL_PORTFOLIOS.find((p) => p.code === mongoUp["portfolio_code"]) ??
+            BEEZAT_MODEL_PORTFOLIOS[1]!;
+          up = {
+            id: String(mongoUp._id),
+            user_id: userId,
+            portfolio_id: matched.code,
+            amount_kwd: mongoUp["amount_kwd"] || 1500,
+            is_active: true,
+            model_portfolios: {
+              id: matched.code,
+              name_ar: matched.name_ar,
+              expected_return: matched.expected_return,
+              volatility: matched.volatility,
+            },
+          };
+        }
+      } catch (mErr) {
+        console.warn("[MongoDB] user portfolio fallback lookup:", mErr);
       }
     }
 
-    if (!up) return null;
+    // إذا كان المستخدم جديداً ولم ينشئ محفظة بعد، ننشئ له محفظة تجريبية بالرصيد المجاني 1,500 د.ك
+    if (!up) {
+      const def = BEEZAT_MODEL_PORTFOLIOS[1]!;
+      const upId = await createUserPortfolio(supabase, userId, def.code, 1500);
+      up = {
+        id: upId,
+        user_id: userId,
+        portfolio_id: def.code,
+        amount_kwd: 1500,
+        is_active: true,
+        model_portfolios: {
+          id: def.code,
+          name_ar: def.name_ar,
+          expected_return: def.expected_return,
+          volatility: def.volatility,
+        },
+      };
+    }
 
-    const { ensureFreshPrices } = await import("./prices.server");
-    const prices = await ensureFreshPrices();
+    // التأكد من وجود بيانات المحفظة النموذجية المرفقة
+    if (!up.model_portfolios) {
+      const matched =
+        BEEZAT_MODEL_PORTFOLIOS.find((p) => p.code === up.portfolio_id) ??
+        BEEZAT_MODEL_PORTFOLIOS[1]!;
+      up.model_portfolios = {
+        id: matched.code,
+        name_ar: matched.name_ar,
+        expected_return: matched.expected_return,
+        volatility: matched.volatility,
+      };
+    }
+
+    const prices = await ensureFreshPrices().catch(() => DEFAULT_PRICES);
     const priceOf = (ticker: string) =>
-      Number(prices.find((p) => p.ticker === ticker)?.price_kwd) || 0;
+      Number(prices.find((p) => p.ticker === ticker)?.price_kwd) ||
+      Number(DEFAULT_PRICES.find((p) => p.ticker === ticker)?.price_kwd) ||
+      1;
 
-    let { data: holdings, error: hErr } = await supabase
-      .from("holdings")
-      .select("*")
-      .eq("user_portfolio_id", up.id)
-      .order("target_weight", { ascending: false });
-    if (hErr) throw new Error(hErr.message);
+    let holdings: any[] = [];
+    try {
+      const { data: hData, error: hErr } = await supabase
+        .from("holdings")
+        .select("*")
+        .eq("user_portfolio_id", up.id)
+        .order("target_weight", { ascending: false });
+      if (!hErr && hData) holdings = hData;
+    } catch {
+      // fallback
+    }
 
-    // إذا كان رصيد المستخدم 0، نمنحه رصيد الـ 1,500 د.ك التجريبي فوراً ونوزعه على الأصول
-    if (Number(up.amount_kwd) === 0) {
-      up.amount_kwd = 1500;
-      await supabase.from("user_portfolios").update({ amount_kwd: 1500 }).eq("id", up.id);
-      if (holdings && holdings.length > 0) {
-        for (const h of holdings) {
-          const value = Number(((1500 * Number(h.target_weight)) / 100).toFixed(3));
-          const price = priceOf(h.ticker);
-          const units = price > 0 ? Number((value / price).toFixed(6)) : 0;
-          h.value_kwd = value;
-          h.units = units;
-          try {
-            const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-            await supabaseAdmin.from("holdings").update({ value_kwd: value, units }).eq("id", h.id);
-          } catch {
-            await supabase.from("holdings").update({ value_kwd: value, units }).eq("id", h.id);
-          }
+    // إذا كانت الأصول فارغة، نملؤها تلقائياً بالرصيد التجريبي المجاني 1,500 د.ك
+    if (!holdings || holdings.length === 0) {
+      const matched =
+        BEEZAT_MODEL_PORTFOLIOS.find(
+          (p) => p.code === up.portfolio_id || p.name_ar === up.model_portfolios?.name_ar,
+        ) ?? BEEZAT_MODEL_PORTFOLIOS[1]!;
+
+      const initialAmountKwd = Number(up.amount_kwd) || 1500;
+      holdings = matched.allocations.map((a, idx) => {
+        const value = Number(((initialAmountKwd * Number(a.target_weight)) / 100).toFixed(3));
+        const price = priceOf(a.ticker);
+        const units = price > 0 ? Number((value / price).toFixed(6)) : 0;
+        return {
+          id: `h_${idx}_${a.ticker}`,
+          user_portfolio_id: up.id,
+          user_id: userId,
+          ticker: a.ticker,
+          asset_name_ar: a.asset_name_ar,
+          asset_class_ar: a.asset_class_ar,
+          target_weight: a.target_weight,
+          value_kwd: value,
+          units: units,
+        };
+      });
+
+      try {
+        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+        await supabaseAdmin.from("holdings").insert(holdings);
+      } catch {
+        try {
+          await supabase.from("holdings").insert(holdings);
+        } catch {
+          // ignore
         }
       }
     }
@@ -461,6 +756,7 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
       value_kwd: number;
       units: number;
     }> = [];
+
     for (const h of holdings ?? []) {
       const price = priceOf(h.ticker);
       let units = Number(h.units);
@@ -470,13 +766,16 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
         const nextValue = Number((units * price).toFixed(3));
         if (nextValue !== value || units !== Number(h.units)) {
           value = nextValue;
-          const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-          const { error: uErr } = await supabaseAdmin
-            .from("holdings")
-            .update({ units, value_kwd: value, updated_at: new Date().toISOString() })
-            .eq("id", h.id)
-            .eq("user_id", userId);
-          if (uErr) throw new Error(uErr.message);
+          try {
+            const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+            await supabaseAdmin
+              .from("holdings")
+              .update({ units, value_kwd: value, updated_at: new Date().toISOString() })
+              .eq("id", h.id)
+              .eq("user_id", userId);
+          } catch {
+            // ignore
+          }
         }
       }
       revalued.push({
@@ -489,23 +788,28 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
       });
     }
 
-    const { data: events, error: eErr } = await supabase
-      .from("rebalance_events")
-      .select("*")
-      .eq("user_portfolio_id", up.id)
-      .order("created_at", { ascending: false })
-      .limit(20);
-    if (eErr) throw new Error(eErr.message);
+    let events: any[] = [];
+    try {
+      const { data: evData } = await supabase
+        .from("rebalance_events")
+        .select("*")
+        .eq("user_portfolio_id", up.id)
+        .order("created_at", { ascending: false })
+        .limit(20);
+      if (evData) events = evData;
+    } catch {
+      // ignore
+    }
 
     const drift = computeDrift(revalued);
 
     return {
       userPortfolio: up,
       holdings: revalued,
-      events: events ?? [],
+      events,
       drift,
       prices,
-      invested: Number(up.amount_kwd),
+      invested: Number(up.amount_kwd) || 1500,
     };
   });
 

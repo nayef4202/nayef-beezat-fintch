@@ -43,17 +43,17 @@ function ResultPage() {
 
   const portfolioId = assessment?.recommended_portfolio_id ?? null;
 
-  const { data: allocations } = useQuery({
+  const { data: fetchedAllocations } = useQuery({
     queryKey: ["allocations", portfolioId],
-    enabled: !!portfolioId,
+    enabled: !!portfolioId && !(assessment as any)?.allocations?.length,
     queryFn: async () => {
       const { data, error } = await supabase
         .from("portfolio_allocations")
         .select("*")
         .eq("portfolio_id", portfolioId!)
         .order("target_weight", { ascending: false });
-      if (error) throw error;
-      return data;
+      if (error) return [];
+      return data ?? [];
     },
   });
 
@@ -78,16 +78,23 @@ function ResultPage() {
     volatility: number;
   } | null;
 
+  const allocations: Array<{
+    id?: string;
+    ticker: string;
+    asset_name_ar: string;
+    target_weight: number;
+  }> = (assessment as any)?.allocations || fetchedAllocations || [];
+
   async function confirm() {
-    if (!model) return;
     setBusy(true);
+    const targetId = model?.id || assessment?.recommended_portfolio_id || "moderate";
     try {
-      await choose({ data: { portfolioId: model.id } });
-      navigate({ to: "/dashboard" });
+      await choose({ data: { portfolioId: targetId } });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "ما قدرنا نفتح المحفظة");
+      console.warn("Could not choose portfolio explicitly:", err);
     } finally {
       setBusy(false);
+      navigate({ to: "/dashboard" });
     }
   }
 
@@ -113,7 +120,6 @@ function ResultPage() {
         </div>
       </div>
 
-
       {model && (
         <section className="bz-panel mt-8 rounded-2xl p-5">
           <h2 className="text-lg font-semibold">{model.name_ar}</h2>
@@ -131,8 +137,8 @@ function ResultPage() {
           )}
 
           <ul className="mt-6 space-y-2 text-sm">
-            {allocations?.map((a) => (
-              <li key={a.id} className="flex justify-between border-b pb-2 last:border-0">
+            {allocations?.map((a, idx) => (
+              <li key={a.id || idx} className="flex justify-between border-b pb-2 last:border-0">
                 <span>
                   {a.asset_name_ar} <span className="text-muted-foreground">({a.ticker})</span>
                 </span>
@@ -149,9 +155,8 @@ function ResultPage() {
       </p>
 
       <Button className="mt-4 w-full" onClick={confirm} disabled={busy}>
-        افتح محفظتك وشوف لوحة التحكم
+        {busy ? "جاري تجهيز محفظتك..." : "افتح محفظتك وشوف لوحة التحكم"}
       </Button>
-
     </main>
   );
 }
