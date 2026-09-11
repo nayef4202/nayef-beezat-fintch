@@ -6,7 +6,9 @@
 let clientPromise: Promise<any> | null = null;
 
 export async function getMongoClient() {
-  const uri = process.env.MONGODB_URI;
+  const uri =
+    process.env.MONGODB_URI ||
+    (typeof import.meta !== "undefined" && import.meta.env?.["VITE_MONGODB_URI"]);
 
   if (!uri) {
     throw new Error(
@@ -14,9 +16,12 @@ export async function getMongoClient() {
     );
   }
 
+  const clientOptions = {
+    serverSelectionTimeoutMS: 6000,
+    connectTimeoutMS: 6000,
+  };
+
   if (process.env.NODE_ENV === "development") {
-    // In development mode, use a global variable so that the MongoClient
-    // instance is not recreated every time during HMR.
     const globalWithMongo = global as typeof globalThis & {
       _mongoClientPromise?: Promise<any>;
     };
@@ -24,6 +29,7 @@ export async function getMongoClient() {
     if (!globalWithMongo._mongoClientPromise) {
       const { MongoClient, ServerApiVersion } = await import("mongodb");
       const client = new MongoClient(uri, {
+        ...clientOptions,
         serverApi: {
           version: ServerApiVersion.v1,
           strict: true,
@@ -37,6 +43,7 @@ export async function getMongoClient() {
     if (!clientPromise) {
       const { MongoClient, ServerApiVersion } = await import("mongodb");
       const client = new MongoClient(uri, {
+        ...clientOptions,
         serverApi: {
           version: ServerApiVersion.v1,
           strict: true,

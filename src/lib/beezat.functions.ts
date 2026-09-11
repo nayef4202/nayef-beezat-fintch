@@ -29,8 +29,46 @@ export const refreshAssetPrices = createServerFn({ method: "POST" })
     return await ensureFreshPrices(true);
   });
 
-/** كل المحافظ النموذجية مع أوزانها */
+/** كل المحافظ النموذجية مع أوزانها (تدعم MongoDB Atlas تلقائياً مع التعبئة الذاتية وFallback) */
 export const getModelPortfolios = createServerFn({ method: "GET" }).handler(async () => {
+  // محاولة الجلب والتعبئة التلقائية أولاً من MongoDB Atlas
+  try {
+    const { getMongoDb } = await import("@/integrations/mongodb");
+    const db = await getMongoDb("beezat");
+    const collection = db.collection("model_portfolios");
+    const count = await collection.countDocuments();
+
+    // إذا كانت المجموعة فارغة في أطلس، نقوم بالبذر التلقائي فوراً
+    if (count === 0) {
+      const { seedBeezatMongoData } = await import("@/integrations/mongodb/seed");
+      await seedBeezatMongoData();
+    }
+
+    const mongoPortfolios = await collection
+      .find({})
+      .sort({ sort_order: 1 })
+      .toArray();
+
+    if (mongoPortfolios && mongoPortfolios.length > 0) {
+      return mongoPortfolios.map((p) => ({
+        id: p._id ? String(p._id) : p.code,
+        code: p.code,
+        name_ar: p.name_ar,
+        description_ar: p.description_ar,
+        risk_level: p.risk_level,
+        min_score: p.min_score,
+        max_score: p.max_score,
+        expected_return: p.expected_return,
+        volatility: p.volatility,
+        sort_order: p.sort_order,
+        allocations: p.allocations ?? [],
+      }));
+    }
+  } catch (mongoError) {
+    console.warn("[MongoDB Atlas] fallback to Supabase for portfolios:", mongoError);
+  }
+
+  // في حال تعذر الوصول لأطلس، نعتمد على Supabase كاحتياط لضمان عدم توقف الموقع
   const { createClient } = await import("@supabase/supabase-js");
   const supabasePublic = createClient<Database>(
     process.env["SUPABASE_URL"]!,
@@ -58,7 +96,7 @@ export const getModelPortfolios = createServerFn({ method: "GET" }).handler(asyn
   }));
 });
 
-/** حساب درجة المخاطرة وحفظ نتيجة الاستبيان */
+/** حساب درجة المخاطرة وحفظ نتيجة الاستبيان في MongoDB و Supabase */
 export const submitAssessment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => answersSchema.parse(input))
@@ -110,6 +148,41 @@ export const submitAssessment = createServerFn({ method: "POST" })
     let userPortfolioId = active?.id ?? null;
     if (!userPortfolioId) {
       userPortfolioId = await createUserPortfolio(supabase, userId, match.id);
+    }
+
+    // حفظ تقييم المخاطر والمحفظة تلقائياً في MongoDB Atlas
+    try {
+      const { getMongoDb } = await import("@/integrations/mongodb");
+      const db = await getMongoDb("beezat");
+      await db.collection("risk_assessments").insertOne({
+        user_id: userId,
+        score,
+        risk_level: match.risk_level,
+        expected_return: match.expected_return,
+        recommended_portfolio_code: match.code,
+        recommended_portfolio_name: match.name_ar,
+        answers: data.answers,
+        created_at: new Date(),
+      });
+      await db.collection("user_portfolios").updateOne(
+        { user_id: userId, is_active: true },
+        {
+          $set: {
+            user_id: userId,
+            portfolio_code: match.code,
+            portfolio_name: match.name_ar,
+            is_active: true,
+            updated_at: new Date(),
+          },
+          $setOnInsert: {
+            amount_kwd: 0,
+            created_at: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+    } catch (mErr) {
+      console.warn("[MongoDB Atlas] Error writing assessment to MongoDB:", mErr);
     }
 
     return { assessment: saved, portfolio: match, userPortfolioId };
