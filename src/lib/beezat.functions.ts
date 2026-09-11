@@ -690,3 +690,29 @@ export const requestWithdrawal = createServerFn({ method: "POST" })
     if (error) throw new Error(error.message);
     return { requested: true };
   });
+
+/** فحص حالة الربط مع MongoDB AI */
+export const checkMongoDBAIStatus = createServerFn({ method: "GET" }).handler(async () => {
+  const { mongodbAI } = await import("@/integrations/mongodb");
+  return await mongodbAI.checkConnection();
+});
+
+/** بحث وترتيب ذكي للاستثمارات والمحافظ المتوافقة مع الشريعة باستخدام MongoDB AI */
+export const smartInvestmentSearch = createServerFn({ method: "POST" })
+  .inputValidator((input: unknown) =>
+    z.object({
+      query: z.string().min(2),
+      candidates: z.array(z.string()).min(1),
+    }).parse(input)
+  )
+  .handler(async ({ data }) => {
+    const { mongodbAI } = await import("@/integrations/mongodb");
+    const result = await mongodbAI.rerank({
+      query: data.query,
+      documents: data.candidates,
+      model: "rerank-2",
+      returnDocuments: true,
+    });
+    return result;
+  });
+
