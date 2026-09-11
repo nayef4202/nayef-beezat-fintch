@@ -44,9 +44,37 @@ function AuthPage() {
     setBusy(true);
     try {
       if (mode === "signup") {
-        await register({ data: { fullName: name, email, phone, password } });
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        try {
+          await register({ data: { fullName: name, email, phone, password } });
+        } catch (serverErr: unknown) {
+          const msg = serverErr instanceof Error ? serverErr.message : String(serverErr);
+          // في حال عدم وجود SUPABASE_SERVICE_ROLE_KEY على السيرفر، يتم الاعتماد على تسجيل Supabase المباشر
+          if (msg.includes("SUPABASE_SERVICE_ROLE_KEY")) {
+            const { error: signUpError } = await supabase.auth.signUp({
+              email,
+              password,
+              options: {
+                data: {
+                  full_name: name,
+                  phone,
+                },
+              },
+            });
+            if (signUpError) throw signUpError;
+          } else {
+            throw serverErr;
+          }
+        }
+
+        const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+        if (signInError) {
+          if (signInError.message.includes("Email not confirmed")) {
+            toast.success("تم إنشاء الحساب بنجاح! يرجى التحقق من بريدك الإلكتروني لتأكيده.");
+            setBusy(false);
+            return;
+          }
+          throw signInError;
+        }
         toast.success("تم إنشاء حسابك بنجاح");
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
