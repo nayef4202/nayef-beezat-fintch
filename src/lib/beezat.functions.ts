@@ -190,11 +190,12 @@ export const submitAssessment = createServerFn({ method: "POST" })
 
 type AuthedClient = SupabaseClient<Database>;
 
-/** ينشئ محفظة المستخدم وأصولها بأوزان المحفظة النموذجية */
+/** ينشئ محفظة المستخدم وأصولها بأوزان المحفظة النموذجية مع رصيد تجريبي مجاني 1,500 د.ك */
 async function createUserPortfolio(
   supabase: AuthedClient,
   userId: string,
   portfolioId: string,
+  initialAmountKwd: number = 1500,
 ): Promise<string> {
   const { data: allocations, error: aErr } = await supabase
     .from("portfolio_allocations")
@@ -207,24 +208,90 @@ async function createUserPortfolio(
 
   const { data: up, error: upErr } = await supabase
     .from("user_portfolios")
-    .insert({ user_id: userId, portfolio_id: portfolioId, amount_kwd: 0, is_active: true })
+    .insert({
+      user_id: userId,
+      portfolio_id: portfolioId,
+      amount_kwd: initialAmountKwd,
+      is_active: true,
+    })
     .select("*")
     .single();
   if (upErr) throw new Error(upErr.message);
 
-  const rows = allocations.map((a: Database["public"]["Tables"]["portfolio_allocations"]["Row"]) => ({
-    user_portfolio_id: up.id,
-    user_id: userId,
-    ticker: a.ticker,
-    asset_name_ar: a.asset_name_ar,
-    asset_class_ar: a.asset_class_ar,
-    target_weight: a.target_weight,
-    value_kwd: 0,
-    units: 0,
-  }));
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { error: hErr } = await supabaseAdmin.from("holdings").insert(rows);
-  if (hErr) throw new Error(hErr.message);
+  const { ensureFreshPrices } = await import("./prices.server");
+  const prices = await ensureFreshPrices().catch(() => []);
+  const priceOf = (ticker: string) =>
+    Number(prices.find((p) => p.ticker === ticker)?.price_kwd) || 0;
+
+  const rows = allocations.map((a: Database["public"]["Tables"]["portfolio_allocations"]["Row"]) => {
+    const value = Number(((initialAmountKwd * Number(a.target_weight)) / 100).toFixed(3));
+    const price = priceOf(a.ticker);
+    const units = price > 0 ? Number((value / price).toFixed(6)) : 0;
+    return {
+      user_portfolio_id: up.id,
+      user_id: userId,
+      ticker: a.ticker,
+      asset_name_ar: a.asset_name_ar,
+      asset_class_ar: a.asset_class_ar,
+      target_weight: a.target_weight,
+      value_kwd: value,
+      units: units,
+    };
+  });
+
+  let insertedHoldings = false;
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error: hErr } = await supabaseAdmin.from("holdings").insert(rows);
+    if (!hErr) insertedHoldings = true;
+  } catch {
+    // fallback to authed client
+  }
+  if (!insertedHoldings) {
+    const { error: hErr } = await supabase.from("holdings").insert(rows);
+    if (hErr) console.warn("Fallback inserting holdings:", hErr.message);
+  }
+
+  // تسجيل معاملة الرصيد الترحيبي التجريبي
+  try {
+    await supabase.from("wallet_transactions").insert({
+      user_id: userId,
+      user_portfolio_id: up.id,
+      transaction_type: "deposit",
+      amount_kwd: initialAmountKwd,
+      status: "completed",
+      provider: "beezat_demo_bonus",
+      idempotency_key: `demo_bonus_${up.id}`,
+      metadata: { description: "رصيد تجريبي مجاني ترحيبي بقيمة 1,500 د.ك" },
+    });
+  } catch (txErr) {
+    console.warn("Could not insert demo bonus tx:", txErr);
+  }
+
+  // مزامنة محفظة المستخدم مع MongoDB Atlas تلقائياً بالرصيد التجريبي
+  try {
+    const { getMongoDb } = await import("@/integrations/mongodb");
+    const db = await getMongoDb("beezat");
+    await db.collection("user_portfolios").updateOne(
+      { user_id: userId, is_active: true },
+      {
+        $set: {
+          user_id: userId,
+          portfolio_id: portfolioId,
+          amount_kwd: initialAmountKwd,
+          is_active: true,
+          is_demo: true,
+          updated_at: new Date(),
+        },
+        $setOnInsert: {
+          created_at: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+  } catch (mErr) {
+    console.warn("[MongoDB Atlas] Error syncing user portfolio to MongoDB:", mErr);
+  }
 
   return up.id as string;
 }
@@ -318,7 +385,7 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     const { supabase, userId } = context;
 
-    const { data: up, error } = await supabase
+    let { data: up, error } = await supabase
       .from("user_portfolios")
       .select("*, model_portfolios:portfolio_id(*)")
       .eq("user_id", userId)
@@ -327,6 +394,29 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
       .limit(1)
       .maybeSingle();
     if (error) throw new Error(error.message);
+
+    // إذا كان المستخدم جديداً ولم ينشئ محفظة بعد، ننشئ له محفظة تجريبية بالرصيد المجاني 1,500 د.ك
+    if (!up) {
+      const { data: moderateModel } = await supabase
+        .from("model_portfolios")
+        .select("id")
+        .eq("code", "moderate")
+        .maybeSingle();
+
+      const fallbackModel =
+        moderateModel ||
+        (await supabase.from("model_portfolios").select("id").limit(1).maybeSingle()).data;
+      if (fallbackModel?.id) {
+        const upId = await createUserPortfolio(supabase, userId, fallbackModel.id, 1500);
+        const { data: newUp } = await supabase
+          .from("user_portfolios")
+          .select("*, model_portfolios:portfolio_id(*)")
+          .eq("id", upId)
+          .maybeSingle();
+        up = newUp;
+      }
+    }
+
     if (!up) return null;
 
     const { ensureFreshPrices } = await import("./prices.server");
@@ -334,12 +424,33 @@ export const getMyPortfolio = createServerFn({ method: "POST" })
     const priceOf = (ticker: string) =>
       Number(prices.find((p) => p.ticker === ticker)?.price_kwd) || 0;
 
-    const { data: holdings, error: hErr } = await supabase
+    let { data: holdings, error: hErr } = await supabase
       .from("holdings")
       .select("*")
       .eq("user_portfolio_id", up.id)
       .order("target_weight", { ascending: false });
     if (hErr) throw new Error(hErr.message);
+
+    // إذا كان رصيد المستخدم 0، نمنحه رصيد الـ 1,500 د.ك التجريبي فوراً ونوزعه على الأصول
+    if (Number(up.amount_kwd) === 0) {
+      up.amount_kwd = 1500;
+      await supabase.from("user_portfolios").update({ amount_kwd: 1500 }).eq("id", up.id);
+      if (holdings && holdings.length > 0) {
+        for (const h of holdings) {
+          const value = Number(((1500 * Number(h.target_weight)) / 100).toFixed(3));
+          const price = priceOf(h.ticker);
+          const units = price > 0 ? Number((value / price).toFixed(6)) : 0;
+          h.value_kwd = value;
+          h.units = units;
+          try {
+            const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+            await supabaseAdmin.from("holdings").update({ value_kwd: value, units }).eq("id", h.id);
+          } catch {
+            await supabase.from("holdings").update({ value_kwd: value, units }).eq("id", h.id);
+          }
+        }
+      }
+    }
 
     // إعادة تقييم الأصول حسب آخر سعر سوق حقيقي
     const revalued: Array<{

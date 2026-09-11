@@ -98,9 +98,16 @@ function AuthPage() {
       <h1 className="mb-1 text-xl font-semibold">
         {mode === "signin" ? "تسجيل الدخول" : "إنشاء حساب جديد"}
       </h1>
-      <p className="mb-6 text-sm text-muted-foreground">
+      <p className="mb-4 text-sm text-muted-foreground">
         استثمار آلي متوافق مع الشريعة الإسلامية.
       </p>
+
+      {mode === "signup" && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 p-3 text-xs text-primary font-medium">
+          <span className="text-base">🎁</span>
+          <span>هدية تسجيل: رصيد تجريبي مجاني <strong>1,500 د.ك</strong> مضاف لمحفظتك فوراً لتجربة الاستثمار الذكي!</span>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {mode === "signup" && (

@@ -158,6 +158,12 @@ function PortfolioPage() {
 
 
       <div className="bz-panel bz-surface mt-6 rounded-xl p-5 sm:p-6">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-border/40 pb-3">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-xs font-semibold text-primary">
+            <span>🎁</span> رصيد تجريبي مجاني (1,500 د.ك)
+          </span>
+          <span className="text-xs text-muted-foreground">استثمار تجريبي بأحدث أسعار السوق الحقيقية</span>
+        </div>
         <p className="text-xs text-muted-foreground">القيمة الحالية بأسعار السوق</p>
         <p className="bz-metric mt-1 text-3xl font-bold sm:text-4xl">{formatKwd(drift.total)}</p>
         <p className="mt-1 text-sm">
