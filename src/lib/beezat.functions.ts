@@ -722,4 +722,11 @@ export const checkMongoDBDatabaseStatus = createServerFn({ method: "GET" }).hand
   return await testMongoDbConnection();
 });
 
+/** نقل وتجهيز بيانات بيزات الأساسية داخل قاعدة بيانات MongoDB Atlas */
+export const seedBeezatToMongo = createServerFn({ method: "POST" }).handler(async () => {
+  const { seedBeezatMongoData } = await import("@/integrations/mongodb");
+  return await seedBeezatMongoData();
+});
+
+
 
