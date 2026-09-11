@@ -61,23 +61,6 @@ function AuthPage() {
     }
   }
 
-  async function handleGoogle() {
-    setBusy(true);
-    try {
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          redirectTo: `${window.location.origin}/portfolio`,
-        },
-      });
-      if (error) throw error;
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "ما قدرنا نكمل الدخول عبر جوجل");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <main className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-md flex-col justify-center px-4 py-10">
       <Link to="/" className="mb-8 flex justify-center" aria-label="العودة إلى بيزات">
@@ -140,10 +123,6 @@ function AuthPage() {
           {mode === "signin" ? "دخول" : "إنشاء الحساب"}
         </Button>
       </form>
-
-      <Button variant="outline" className="mt-3 w-full" onClick={handleGoogle}>
-        المتابعة عبر جوجل
-      </Button>
 
       <Button
         variant="link"
