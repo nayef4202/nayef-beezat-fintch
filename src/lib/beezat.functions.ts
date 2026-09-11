@@ -716,3 +716,10 @@ export const smartInvestmentSearch = createServerFn({ method: "POST" })
     return result;
   });
 
+/** فحص حالة الربط مع قاعدة بيانات MongoDB Atlas Cluster */
+export const checkMongoDBDatabaseStatus = createServerFn({ method: "GET" }).handler(async () => {
+  const { testMongoDbConnection } = await import("@/integrations/mongodb");
+  return await testMongoDbConnection();
+});
+
+
