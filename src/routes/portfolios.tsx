@@ -1,12 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { useQuery } from "@tanstack/react-query";
-import { getModelPortfolios, seedBeezatToMongo } from "@/lib/beezat.functions";
+import { getModelPortfolios } from "@/lib/beezat.functions";
 import { riskLevelLabel } from "@/lib/risk";
 import { AssetAllocationChart } from "@/components/AssetAllocationChart";
 import { Button } from "@/components/ui/button";
-import { toast } from "sonner";
-import { useState } from "react";
 
 export const Route = createFileRoute("/portfolios")({
   head: () => ({
@@ -24,48 +22,21 @@ export const Route = createFileRoute("/portfolios")({
 
 function PortfoliosPage() {
   const fetchPortfolios = useServerFn(getModelPortfolios);
-  const runSeed = useServerFn(seedBeezatToMongo);
-  const [isSyncing, setIsSyncing] = useState(false);
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ["model-portfolios"],
     queryFn: () => fetchPortfolios(),
   });
-
-  const handleSyncMongo = async () => {
-    try {
-      setIsSyncing(true);
-      const res = await runSeed();
-      toast.success(res.message || "تمت المزامنة بنجاح مع MongoDB Atlas!");
-      refetch();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      toast.error(`حدث خطأ أثناء المزامنة: ${msg}`);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
 
   if (isLoading) return <main className="p-10 text-center">جاري التحميل...</main>;
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold sm:text-3xl">المحافظ الإسلامية الجاهزة</h1>
-          <p className="mt-2 text-muted-foreground">
-            أربع محافظ متوافقة مع الشريعة، كل محفظة مبنية من صناديق مؤشرات عالمية وموزعة حسب مستوى المخاطرة.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={isSyncing}
-          onClick={handleSyncMongo}
-          className="self-start text-xs sm:self-auto"
-        >
-          {isSyncing ? "جاري المزامنة..." : "🔄 مزامنة مع MongoDB"}
-        </Button>
+      <div>
+        <h1 className="text-2xl font-bold sm:text-3xl">المحافظ الإسلامية الجاهزة</h1>
+        <p className="mt-2 text-muted-foreground">
+          أربع محافظ متوافقة مع الشريعة، كل محفظة مبنية من صناديق مؤشرات عالمية وموزعة حسب مستوى المخاطرة.
+        </p>
       </div>
 
       <div className="mt-8 grid gap-6 md:grid-cols-2">
